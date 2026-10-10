@@ -47,13 +47,12 @@ resource "aws_subnet" "private" {
   cidr_block              = "10.42.1.0/24"
   availability_zone       = "us-east-1a"
   map_public_ip_on_launch = false
-  tags                    = { Name = "bbe-demo-private" }
+  tags                    = { Name = "bbe-demo-web" }
 }
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.demo.id
-  # Only the automatic VPC-local route; no internet or NAT route.
-  tags = { Name = "bbe-demo-private" }
+  tags   = { Name = "bbe-demo-web" }
 }
 
 resource "aws_route_table_association" "private" {
@@ -63,10 +62,36 @@ resource "aws_route_table_association" "private" {
 
 resource "aws_security_group" "isolated" {
   name_prefix = "bbe-demo-isolated-"
-  description = "No inbound or outbound rules for the isolated demo"
+  description = "HTTP and SSH from the configured client IP"
   vpc_id      = aws_vpc.demo.id
-  ingress     = []
-  egress      = []
+  ingress {
+    description = "SSH from client"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.client_cidr]
+  }
+  ingress {
+    description = "HTTP from client"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = [var.client_cidr]
+  }
+  egress {
+    description = "Package downloads over HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Package downloads over HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 resource "aws_instance" "demo" {
@@ -74,7 +99,11 @@ resource "aws_instance" "demo" {
   instance_type               = var.instance_type
   subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.isolated.id]
-  associate_public_ip_address = false
+  associate_public_ip_address = true
+  key_name                    = aws_key_pair.demo.key_name
+  user_data                   = file("${path.module}/webserver.sh")
+  user_data_replace_on_change = true
+  depends_on                  = [aws_route.internet, aws_route_table_association.private]
 
   credit_specification {
     cpu_credits = "standard"
@@ -89,7 +118,7 @@ resource "aws_instance" "demo" {
     http_endpoint = "enabled"
     http_tokens   = "required"
   }
-  tags = { Name = "bbe-demo-private-ec2" }
+  tags = { Name = "bbe-demo-web-ec2" }
 }
 
 output "instance_id" {
@@ -100,4 +129,33 @@ output "private_ip" {
 }
 output "vpc_id" {
   value = aws_vpc.demo.id
+}
+
+variable "client_cidr" {
+  description = "Your public IPv4 address as a /32; allowed to use SSH and HTTP."
+  type        = string
+  validation {
+    condition     = can(cidrnetmask(var.client_cidr)) && can(regex("/32$", var.client_cidr))
+    error_message = "Use one IPv4 address with a /32 prefix."
+  }
+}
+
+resource "aws_internet_gateway" "demo" {
+  vpc_id = aws_vpc.demo.id
+  tags   = { Name = "bbe-demo-web" }
+}
+resource "aws_route" "internet" {
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.demo.id
+}
+resource "aws_key_pair" "demo" {
+  key_name   = "bbe-sandbox-web"
+  public_key = file("${path.module}/.keys/bbe-sandbox.pem.pub")
+}
+output "web_url" {
+  value = "http://${aws_instance.demo.public_ip}"
+}
+output "ssh_command" {
+  value = "ssh -i .keys/bbe-sandbox.pem ec2-user@${aws_instance.demo.public_ip}"
 }

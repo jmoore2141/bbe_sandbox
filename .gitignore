@@ -10,3 +10,6 @@ crash.*.log
 terraform.rc
 .env
 .env.*
+
+.keys/
+*.pem
